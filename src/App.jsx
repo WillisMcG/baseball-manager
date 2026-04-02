@@ -58,12 +58,14 @@ export default function App() {
   const [editingPlayer, setEditingPlayer] = useState(null);
   const [saveNameInput, setSaveNameInput] = useState("");
   const [showSaveForm, setShowSaveForm] = useState(false);
-  const [posDragState, setPosDragState] = useState(null);
   const [batDrag, setBatDrag] = useState(null);
   const batRowRefs = useRef([]);
 
+  // Field tab: tap-to-pick state
+  const [fieldPickPos, setFieldPickPos] = useState(null); // which position is showing player picker
+
   // Depth chart: tap-to-reorder state
-  const [depthEditPos, setDepthEditPos] = useState(null); // which position is open for editing
+  const [depthEditPos, setDepthEditPos] = useState(null);
 
   useEffect(() => {
     loadSaved().then(saved => {
@@ -141,15 +143,45 @@ export default function App() {
     if(fromIdx!==lastOver) setBattingOrder(b=>{const n=[...b],[m]=n.splice(fromIdx,1);n.splice(lastOver,0,m);return n;}); setBatDrag(null);
   }
 
-  // Field lineup
-  function onRosterDragStart(e, pid) { setPosDragState({playerId:pid}); e.dataTransfer.effectAllowed="copy"; }
-  function onPosDrop(e, pos) { e.preventDefault(); if(!posDragState) return; const {playerId}=posDragState, pl=playerById(playerId); if(!pl||!pl.positions.includes(pos)) return; setLineup(l=>({...l,[pos]:playerId})); setPosDragState(null); }
-  function onPosDragOver(e, pos) { e.preventDefault(); if(!posDragState) return; const pl=playerById(posDragState.playerId); e.dataTransfer.dropEffect=(pl&&pl.positions.includes(pos))?"copy":"none"; }
+  // Field lineup: tap position to pick player
   function clearPos(pos) { setLineup(l=>{const n={...l};delete n[pos];return n;}); }
 
+  function assignPlayerToPos(pos, playerId) {
+    // Remove this player from any other position they might be in
+    setLineup(l => {
+      const n = {...l};
+      Object.keys(n).forEach(k => { if (n[k] === playerId) delete n[k]; });
+      n[pos] = playerId;
+      return n;
+    });
+    setFieldPickPos(null);
+  }
+
+  function handleFieldPosClick(pos) {
+    if (lineup[pos]) {
+      // Already assigned — clear it
+      clearPos(pos);
+      setFieldPickPos(null);
+    } else {
+      // Open picker for this position
+      setFieldPickPos(fieldPickPos === pos ? null : pos);
+    }
+  }
+
+  // Auto-fill: requires pitcher first, then fills rest from depth chart
   function autoFillLineup() {
-    const used = new Set(); const next = {};
-    POSITIONS.forEach(pos => { const col = depth[pos] || []; const pick = col.find(id => !used.has(id)); if (pick) { next[pos] = pick; used.add(pick); } });
+    if (!lineup["P"]) return; // pitcher must be selected first
+    const used = new Set();
+    const next = {...lineup}; // keep existing assignments (especially P)
+    // Mark already-assigned players as used
+    Object.values(next).forEach(id => used.add(id));
+    // Fill remaining positions from depth chart
+    POSITIONS.forEach(pos => {
+      if (next[pos]) return; // already assigned
+      const col = depth[pos] || [];
+      const pick = col.find(id => !used.has(id));
+      if (pick) { next[pos] = pick; used.add(pick); }
+    });
     setLineup(next);
   }
 
@@ -159,29 +191,19 @@ export default function App() {
   function deleteLineup(id) { setSavedLineups(sl => sl.filter(s => s.id !== id)); }
   function overwriteLineup(id) { setSavedLineups(sl => sl.map(s => s.id===id ? {...s,lineup:{...lineup},battingOrder:[...battingOrder]} : s)); }
 
-  // Depth chart: move player up/down by tapping arrows
+  // Depth chart: move player up/down
   function depthMoveUp(pos, idx) {
     if (idx === 0) return;
-    setDepth(d => {
-      const n = {...d, [pos]: [...d[pos]]};
-      const [item] = n[pos].splice(idx, 1);
-      n[pos].splice(idx - 1, 0, item);
-      return n;
-    });
+    setDepth(d => { const n = {...d, [pos]: [...d[pos]]}; const [item] = n[pos].splice(idx, 1); n[pos].splice(idx - 1, 0, item); return n; });
   }
-
   function depthMoveDown(pos, idx) {
     const col = depth[pos] || [];
     if (idx >= col.length - 1) return;
-    setDepth(d => {
-      const n = {...d, [pos]: [...d[pos]]};
-      const [item] = n[pos].splice(idx, 1);
-      n[pos].splice(idx + 1, 0, item);
-      return n;
-    });
+    setDepth(d => { const n = {...d, [pos]: [...d[pos]]}; const [item] = n[pos].splice(idx, 1); n[pos].splice(idx + 1, 0, item); return n; });
   }
 
   const assignedIds = new Set(Object.values(lineup));
+  const hasPitcher = !!lineup["P"];
 
   if (!ready) return (<div style={{minHeight:"100vh",background:"#0a1628",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{fontFamily:"'Oswald',sans-serif",color:"#c8973a",letterSpacing:".2em",fontSize:13}}>LOADING…</div></div>);
 
@@ -196,9 +218,9 @@ export default function App() {
         .pos-chip{display:inline-flex;align-items:center;justify-content:center;width:36px;height:28px;font-family:'Oswald',sans-serif;font-size:11px;font-weight:600;letter-spacing:.05em;border-radius:4px;cursor:pointer;border:1.5px solid;transition:all .15s;user-select:none;}
         .pos-on{background:#c8973a22;border-color:#c8973a;color:#c8973a;} .pos-off{background:transparent;border-color:#2a4060;color:#4a6080;} .pos-off:hover{border-color:#5a7090;color:#8aa0b8;}
         .bat-row{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;transition:border-color .15s,background .15s;cursor:grab;user-select:none;} .bat-row:active{cursor:grabbing;} .bat-row.dragging{opacity:.4;} .bat-row.drag-over{border-color:#c8973a;background:#1a2e50;} .bat-row:hover{border-color:#2e4a70;}
-        .field-slot{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;}
+        .field-slot{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
         .field-circle{width:52px;height:52px;border-radius:50%;border:2px solid;display:flex;align-items:center;justify-content:center;font-family:'Oswald',sans-serif;font-size:11px;font-weight:700;letter-spacing:.06em;transition:all .2s;}
-        .field-circle.empty{border-color:#2a4a6a;background:#0a1628aa;color:#2a4a6a;} .field-circle.filled{border-color:#c8973a;background:#c8973a22;color:#c8973a;} .field-circle.can-drop{border-color:#4aaa6a;background:#0a2a1a88;color:#4aaa6a;animation:pulse .8s infinite alternate;} .field-circle.cannot-drop{opacity:.4;}
+        .field-circle.empty{border-color:#2a4a6a;background:#0a1628aa;color:#2a4a6a;} .field-circle.filled{border-color:#c8973a;background:#c8973a22;color:#c8973a;} .field-circle.picking{border-color:#4aaa6a;background:#0a2a1a88;color:#4aaa6a;animation:pulse .8s infinite alternate;}
         @keyframes pulse{from{box-shadow:0 0 0 0 #4aaa6a44}to{box-shadow:0 0 0 8px #4aaa6a00}}
         input[type=text]{background:#0f2040;border:1.5px solid #1e3350;border-radius:6px;color:#e8dcc8;padding:10px 14px;font-family:'Crimson Text',serif;font-size:16px;outline:none;transition:border-color .2s;width:100%;} input[type=text]:focus{border-color:#c8973a;}
         .btn-primary{background:#c8973a;color:#0a1628;border:none;border-radius:6px;padding:10px 22px;font-family:'Oswald',sans-serif;font-weight:700;font-size:13px;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .15s;white-space:nowrap;} .btn-primary:hover{background:#daa84a;} .btn-primary:disabled{opacity:.4;cursor:default;}
@@ -212,7 +234,7 @@ export default function App() {
         .depth-pos-btn{display:flex;align-items:center;justify-content:center;padding:10px 16px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;cursor:pointer;transition:all .15s;gap:8px;} .depth-pos-btn:hover{border-color:#2e4a70;} .depth-pos-btn.active{border-color:#c8973a;background:#1a2e50;}
         .depth-player-row{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;margin-bottom:6px;transition:all .15s;}
         .depth-arrow{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;border:1.5px solid #1e3350;background:transparent;color:#7a8fa6;cursor:pointer;font-size:16px;transition:all .15s;flex-shrink:0;} .depth-arrow:hover{border-color:#c8973a;color:#c8973a;background:#c8973a11;} .depth-arrow:disabled{opacity:.2;cursor:default;}
-        .depth-overlay{position:fixed;inset:0;background:#0a1628ee;z-index:100;display:flex;flex-direction:column;padding:20px;overflow-y:auto;}
+        .pick-player{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent;} .pick-player:hover{border-color:#4aaa6a;background:#0a2a1a44;} .pick-player.already-assigned{opacity:.35;cursor:default;}
       `}</style>
 
       <div style={{borderBottom:"1px solid #1e3350",padding:"16px 20px",display:"flex",alignItems:"center",gap:14}}>
@@ -222,16 +244,96 @@ export default function App() {
       </div>
 
       <div style={{display:"flex",gap:3,padding:"14px 20px 0",flexWrap:"wrap"}}>
-        {[["roster","📋 Roster"],["batting","🏏 Batting"],["field","🏟 Field"],["lineups","💾 Lineups"],["depth","📊 Depth Chart"]].map(([t,label])=>(<button key={t} className={`tab-btn ${activeTab===t?"tab-active":"tab-inactive"}`} onClick={()=>setActiveTab(t)}>{label}</button>))}
+        {[["roster","📋 Roster"],["batting","🏏 Batting"],["field","🏟 Field"],["lineups","💾 Lineups"],["depth","📊 Depth Chart"]].map(([t,label])=>(<button key={t} className={`tab-btn ${activeTab===t?"tab-active":"tab-inactive"}`} onClick={()=>{setActiveTab(t);setFieldPickPos(null);}}>{label}</button>))}
       </div>
 
       <div style={{padding:"20px",maxWidth:960,margin:"0 auto"}}>
+        {/* ════════ ROSTER ════════ */}
         {activeTab==="roster" && (<div style={{display:"flex",flexDirection:"column",gap:20}}><div className="card"><div className="section-label">Add Player</div><div style={{display:"flex",gap:10,marginBottom:12}}><input type="text" placeholder="Player name…" value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addPlayer()}/><button className="btn-primary" onClick={addPlayer} disabled={!newName.trim()||newPos.length===0}>Add</button></div><div className="section-label">Positions</div><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{POSITIONS.map(pos=>(<div key={pos} className={`pos-chip ${newPos.includes(pos)?"pos-on":"pos-off"}`} onClick={()=>setNewPos(p=>p.includes(pos)?p.filter(x=>x!==pos):[...p,pos])} title={POSITION_LABELS[pos]}>{pos}</div>))}</div></div>{players.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:40}}>No players yet.</div>:<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="section-label">{players.length} Players</div>{players.map(pl=>(editingPlayer?.id===pl.id?(<div key={pl.id} className="card" style={{borderColor:"#c8973a"}}><input type="text" value={editingPlayer.name} onChange={e=>setEditingPlayer(ep=>({...ep,name:e.target.value}))} style={{marginBottom:10}}/><div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>{POSITIONS.map(pos=>(<div key={pos} className={`pos-chip ${editingPlayer.positions.includes(pos)?"pos-on":"pos-off"}`} onClick={()=>setEditingPlayer(ep=>({...ep,positions:ep.positions.includes(pos)?ep.positions.filter(x=>x!==pos):[...ep.positions,pos]}))} title={POSITION_LABELS[pos]}>{pos}</div>))}</div><div style={{display:"flex",gap:8}}><button className="btn-primary" onClick={saveEdit} disabled={!editingPlayer.name.trim()||editingPlayer.positions.length===0}>Save</button><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6"}} onClick={()=>setEditingPlayer(null)}>Cancel</button></div></div>):(<div key={pl.id} className="player-row"><div style={{fontFamily:"'Oswald',sans-serif",fontSize:15,flex:1}}>{pl.name}</div><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{pl.positions.map(p=><span key={p} className="pos-badge">{p}</span>)}</div><button className="btn-subtle" onClick={()=>setEditingPlayer({...pl})}>Edit</button><button className="btn-ghost" onClick={()=>removePlayer(pl.id)}>✕</button></div>)))}</div>}</div>)}
 
+        {/* ════════ BATTING ORDER ════════ */}
         {activeTab==="batting" && (<div>{battingOrder.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:60}}>Add players to the roster first.</div>:<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="section-label" style={{marginBottom:10}}>Drag to reorder</div>{battingOrder.map((pid,idx)=>{const pl=playerById(pid);if(!pl) return null;const isDragging=batDrag?.from===idx;const isOver=batDrag?.over===idx&&batDrag?.from!==idx;return(<div key={pid} ref={el=>batRowRefs.current[idx]=el} className={`bat-row${isDragging?" dragging":""}${isOver?" drag-over":""}`} draggable onDragStart={e=>onBatDragStart(e,idx)} onDragOver={e=>onBatDragOver(e,idx)} onDrop={e=>onBatDrop(e,idx)} onDragEnd={()=>setBatDrag(null)} onTouchStart={e=>onBatTouchStart(e,idx)} onTouchMove={onBatTouchMove} onTouchEnd={onBatTouchEnd} style={{touchAction:"none"}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:22,fontWeight:700,color:"#c8973a",width:28,textAlign:"right"}}>{idx+1}</div><div style={{width:1,height:26,background:"#1e3350"}}/><div style={{fontSize:13,color:"#4a6a8a"}}>☰</div><div style={{fontFamily:"'Oswald',sans-serif",fontSize:16,flex:1}}>{pl.name}</div><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{pl.positions.map(p=><span key={p} className="pos-badge">{p}</span>)}</div></div>);})}</div>}</div>)}
 
-        {activeTab==="field" && (<div style={{display:"flex",gap:20,flexWrap:"wrap"}}><div style={{flex:"0 0 340px"}}><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><div className="section-label" style={{marginBottom:0}}>Field Lineup</div><button className="btn-primary" style={{padding:"6px 14px",fontSize:11}} onClick={autoFillLineup}>⚡ Auto-fill</button>{Object.keys(lineup).length>0&&<button className="btn-ghost" style={{padding:"5px 10px",fontSize:10}} onClick={()=>setLineup({})}>Clear</button>}</div><div style={{position:"relative",width:340,height:340,borderRadius:12,overflow:"hidden",background:"radial-gradient(ellipse at 50% 90%,#1a4a1a 0%,#0d3010 40%,#08200a 100%)",border:"2px solid #1e3350"}}><svg style={{position:"absolute",inset:0,width:"100%",height:"100%",opacity:.35}} viewBox="0 0 340 340"><polygon points="170,260 232,198 170,136 108,198" fill="none" stroke="#7a9a7a" strokeWidth="1.5"/><path d="M108,198 Q170,52 232,198" fill="none" stroke="#7a9a7a" strokeWidth="1" strokeDasharray="4,4"/><line x1="0" y1="260" x2="340" y2="260" stroke="#7a9a7a" strokeWidth="1" opacity=".5"/><circle cx="170" cy="274" r="16" fill="none" stroke="#7a9a7a" strokeWidth="1.5"/></svg>{POSITIONS.filter(p=>p!=="DH").map(pos=>{const coords=FIELD_POSITIONS[pos];const assignedId=lineup[pos];const assignedPlayer=assignedId?playerById(assignedId):null;const draggingPl=posDragState?playerById(posDragState.playerId):null;const canDrop=draggingPl?.positions.includes(pos);const cc=draggingPl?(canDrop?"can-drop":"cannot-drop"):(assignedPlayer?"filled":"empty");const depthRank=assignedId?(depth[pos]||[]).indexOf(assignedId):-1;const isStarter=depthRank===0;return(<div key={pos} className="field-slot" style={{top:coords.top,left:coords.left}} onDragOver={e=>onPosDragOver(e,pos)} onDrop={e=>onPosDrop(e,pos)} onClick={()=>assignedPlayer&&clearPos(pos)}><div className={`field-circle ${cc}`} style={assignedPlayer&&!isStarter?{borderColor:"#d4724a",background:"#2a1a0a88"}:{}}>{assignedPlayer?<span style={{fontSize:8,textAlign:"center",padding:"0 2px",lineHeight:1.2}}>{assignedPlayer.name.split(" ").map(w=>w[0]).join("").slice(0,3)}</span>:pos}</div>{assignedPlayer&&<div style={{fontFamily:"'Oswald',sans-serif",fontSize:8,color:isStarter?"#c8973a":"#d4724a",background:"#0a1628cc",padding:"1px 4px",borderRadius:3,whiteSpace:"nowrap",maxWidth:55,overflow:"hidden",textOverflow:"ellipsis"}}>{assignedPlayer.name.split(" ")[0]}{depthRank>0?` (${depthRank+1})`:""}</div>}</div>);})}</div><div style={{marginTop:8,display:"flex",alignItems:"center",gap:10,padding:"8px 12px",borderRadius:8,border:"1.5px dashed #2a4a6a",background:"#0a1628"}} onDragOver={e=>onPosDragOver(e,"DH")} onDrop={e=>onPosDrop(e,"DH")}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#4a6a8a",letterSpacing:".1em"}}>DH</span>{lineup["DH"]?(()=>{const dhRank=(depth["DH"]||[]).indexOf(lineup["DH"]);const dhPl=playerById(lineup["DH"]);return <span style={{fontFamily:"'Oswald',sans-serif",fontSize:13,color:dhRank===0?"#c8973a":"#d4724a"}}>{dhPl?.name}{dhRank>0?` (depth ${dhRank+1})`:""}</span>;})():<span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#2a4a6a"}}>Drop DH here</span>}{lineup["DH"]&&<button className="btn-ghost" style={{marginLeft:"auto",padding:"3px 8px",fontSize:10}} onClick={()=>clearPos("DH")}>✕</button>}</div><div style={{display:"flex",gap:12,marginTop:8}}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:10,color:"#c8973a"}}>● Depth #1</span><span style={{fontFamily:"'Oswald',sans-serif",fontSize:10,color:"#d4724a"}}>● Backup / Override</span></div></div><div style={{flex:1,minWidth:200}}><div className="section-label">Roster — drag to field</div>{players.length===0?<div style={{color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic"}}>Add players first.</div>:<div style={{display:"flex",flexDirection:"column",gap:6}}>{players.map(pl=>{const isAssigned=assignedIds.has(pl.id);return(<div key={pl.id} className="player-row" draggable onDragStart={e=>onRosterDragStart(e,pl.id)} onDragEnd={()=>setPosDragState(null)} style={{opacity:isAssigned?.5:1,cursor:isAssigned?"default":"grab"}}><div style={{flex:1,fontFamily:"'Oswald',sans-serif",fontSize:14}}>{pl.name}</div><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{pl.positions.map(p=><span key={p} className="pos-badge">{p}</span>)}</div>{isAssigned&&<span style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#4a6a8a"}}>IN LINEUP</span>}</div>);})}</div>}{Object.keys(lineup).length>0&&(<div style={{marginTop:16}}><div className="section-label">Starters</div>{POSITIONS.filter(p=>lineup[p]).map(pos=>(<div key={pos} style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#c8973a",width:28}}>{pos}</span><span style={{fontFamily:"'Crimson Text',serif",fontSize:14}}>{playerById(lineup[pos])?.name}</span><button className="btn-ghost" style={{marginLeft:"auto",padding:"2px 6px",fontSize:10}} onClick={()=>clearPos(pos)}>✕</button></div>))}</div>)}</div></div>)}
+        {/* ════════ FIELD — tap to assign ════════ */}
+        {activeTab==="field" && (<div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+            <div className="section-label" style={{marginBottom:0}}>Field Lineup</div>
+            <button className="btn-primary" style={{padding:"6px 14px",fontSize:11}} onClick={autoFillLineup} disabled={!hasPitcher}>⚡ Auto-fill</button>
+            {!hasPitcher && <span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#d4724a"}}>Select pitcher first</span>}
+            {Object.keys(lineup).length>0&&<button className="btn-ghost" style={{padding:"5px 10px",fontSize:10}} onClick={()=>{setLineup({});setFieldPickPos(null);}}>Clear All</button>}
+          </div>
 
+          {/* Field diagram */}
+          <div style={{position:"relative",width:340,height:340,borderRadius:12,overflow:"hidden",background:"radial-gradient(ellipse at 50% 90%,#1a4a1a 0%,#0d3010 40%,#08200a 100%)",border:"2px solid #1e3350",margin:"0 auto"}}>
+            <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",opacity:.35}} viewBox="0 0 340 340"><polygon points="170,260 232,198 170,136 108,198" fill="none" stroke="#7a9a7a" strokeWidth="1.5"/><path d="M108,198 Q170,52 232,198" fill="none" stroke="#7a9a7a" strokeWidth="1" strokeDasharray="4,4"/><line x1="0" y1="260" x2="340" y2="260" stroke="#7a9a7a" strokeWidth="1" opacity=".5"/><circle cx="170" cy="274" r="16" fill="none" stroke="#7a9a7a" strokeWidth="1.5"/></svg>
+            {POSITIONS.filter(p=>p!=="DH").map(pos=>{
+              const coords=FIELD_POSITIONS[pos];
+              const assignedId=lineup[pos];
+              const assignedPlayer=assignedId?playerById(assignedId):null;
+              const isPicking=fieldPickPos===pos;
+              const cc=isPicking?"picking":(assignedPlayer?"filled":"empty");
+              return(
+                <div key={pos} className="field-slot" style={{top:coords.top,left:coords.left}} onClick={()=>handleFieldPosClick(pos)}>
+                  <div className={`field-circle ${cc}`}>
+                    {assignedPlayer
+                      ?<span style={{fontSize:8,textAlign:"center",padding:"0 2px",lineHeight:1.2}}>{assignedPlayer.name.split(" ").map(w=>w[0]).join("").slice(0,3)}</span>
+                      :pos}
+                  </div>
+                  {assignedPlayer&&<div style={{fontFamily:"'Oswald',sans-serif",fontSize:8,color:"#c8973a",background:"#0a1628cc",padding:"1px 4px",borderRadius:3,whiteSpace:"nowrap",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis"}}>{assignedPlayer.name.split(" ")[0]}</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* DH slot */}
+          <div style={{marginTop:8,display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:8,border:fieldPickPos==="DH"?"1.5px solid #4aaa6a":"1.5px dashed #2a4a6a",background:fieldPickPos==="DH"?"#0a2a1a44":"#0a1628",cursor:"pointer",maxWidth:340,margin:"8px auto 0"}} onClick={()=>handleFieldPosClick("DH")}>
+            <span style={{fontFamily:"'Oswald',sans-serif",fontSize:13,color:fieldPickPos==="DH"?"#4aaa6a":"#4a6a8a",letterSpacing:".1em",fontWeight:700}}>DH</span>
+            {lineup["DH"]?(()=>{const dhPl=playerById(lineup["DH"]);return <span style={{fontFamily:"'Oswald',sans-serif",fontSize:14,color:"#c8973a"}}>{dhPl?.name}</span>;})()
+              :<span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#2a4a6a"}}>Tap to assign</span>}
+          </div>
+
+          {/* Player picker — shows when a position is tapped */}
+          {fieldPickPos && (()=>{
+            const pos = fieldPickPos;
+            const eligible = players.filter(p => p.positions.includes(pos));
+            const currentAssigned = assignedIds;
+            return (
+              <div className="card" style={{borderColor:"#4aaa6a",marginTop:14,maxWidth:340,marginLeft:"auto",marginRight:"auto"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                  <div>
+                    <span style={{fontFamily:"'Oswald',sans-serif",fontSize:16,fontWeight:700,color:"#4aaa6a"}}>Select {POSITION_LABELS[pos]}</span>
+                  </div>
+                  <button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6",padding:"4px 10px",fontSize:10}} onClick={()=>setFieldPickPos(null)}>Cancel</button>
+                </div>
+                {eligible.length===0
+                  ?<div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#3a5a7a",textAlign:"center",padding:16}}>No players can play {pos}. Add positions in the Roster tab.</div>
+                  :<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {eligible.map(pl=>{
+                      const isUsed = currentAssigned.has(pl.id) && lineup[pos] !== pl.id;
+                      return (
+                        <div key={pl.id} className={`pick-player${isUsed?" already-assigned":""}`} onClick={()=>!isUsed&&assignPlayerToPos(pos,pl.id)}>
+                          <div style={{fontFamily:"'Oswald',sans-serif",fontSize:15,flex:1}}>{pl.name}</div>
+                          {isUsed && <span style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#4a6a8a"}}>IN LINEUP</span>}
+                          {!isUsed && <span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#4aaa6a"}}>SELECT</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                }
+              </div>
+            );
+          })()}
+
+          {/* Current starters summary */}
+          {Object.keys(lineup).length>0&&(
+            <div style={{marginTop:16,maxWidth:340,marginLeft:"auto",marginRight:"auto"}}>
+              <div className="section-label">Current Lineup</div>
+              {POSITIONS.filter(p=>lineup[p]).map(pos=>(<div key={pos} style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#c8973a",width:28}}>{pos}</span><span style={{fontFamily:"'Crimson Text',serif",fontSize:14,flex:1}}>{playerById(lineup[pos])?.name}</span><button className="btn-ghost" style={{padding:"2px 6px",fontSize:10}} onClick={()=>clearPos(pos)}>✕</button></div>))}
+            </div>
+          )}
+        </div>)}
+
+        {/* ════════ SAVED LINEUPS ════════ */}
         {activeTab==="lineups" && (<div style={{display:"flex",flexDirection:"column",gap:20}}><div className="card"><div className="section-label">Save Current Lineup</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:12}}>Saves the current field lineup + batting order as a named snapshot.</div>{showSaveForm?(<div style={{display:"flex",gap:10}}><input type="text" placeholder="Lineup name…" value={saveNameInput} onChange={e=>setSaveNameInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveCurrentLineup()}/><button className="btn-primary" onClick={saveCurrentLineup}>Save</button><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6"}} onClick={()=>setShowSaveForm(false)}>Cancel</button></div>):(<button className="btn-primary" onClick={()=>setShowSaveForm(true)}>💾 Save Snapshot</button>)}</div>{savedLineups.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:40}}>No saved lineups yet.</div>:<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="section-label">{savedLineups.length} Saved Lineup{savedLineups.length!==1?"s":""}</div>{savedLineups.map(s=>{const starters=POSITIONS.filter(p=>s.lineup[p]);return(<div key={s.id} className="saved-card"><div style={{flex:1}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:16,marginBottom:4}}>{s.name}</div><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{starters.map(pos=>(<span key={pos} style={{fontFamily:"'Oswald',sans-serif",fontSize:9,padding:"2px 6px",borderRadius:3,background:"#0a1628",border:"1px solid #1e3350",color:"#7a8fa6"}}>{pos}: {playerById(s.lineup[pos])?.name?.split(" ")[0]||"?"}</span>))}</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#4a6a8a",marginTop:4}}>{s.battingOrder.length} batters</div></div><div style={{display:"flex",flexDirection:"column",gap:5}}><button className="btn-subtle" onClick={()=>loadLineup(s)}>Load →</button><button className="btn-subtle" onClick={()=>overwriteLineup(s.id)}>Overwrite</button><button className="btn-ghost" style={{padding:"4px 10px",fontSize:10}} onClick={()=>deleteLineup(s.id)}>Delete</button></div></div>);})}</div>}</div>)}
 
         {/* ════════ DEPTH CHART — tap to reorder ════════ */}
