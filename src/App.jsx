@@ -14,6 +14,9 @@ const FIELD_POSITIONS = {
   RF:  { top: "18%", left: "78%" }, DH: { top: "88%", left: "78%" },
 };
 
+// Auto-fill priority: SS before 3B, 3B before 2B (premium defensive positions first)
+const AUTOFILL_ORDER = ["P", "C", "SS", "3B", "2B", "1B", "LF", "CF", "RF", "DH"];
+
 let nextId = 1;
 function genId() { return nextId++; }
 
@@ -65,9 +68,9 @@ export default function App() {
   const [fieldPickPos, setFieldPickPos] = useState(null);
 
   // Depth chart: drag state
-  const [depthDrag, setDepthDrag] = useState(null); // {pos, from, over}
-  const depthRowRefs = useRef({}); // {pos: [el,...]}
-  const depthTd = useRef(null); // touch drag ref
+  const [depthDrag, setDepthDrag] = useState(null);
+  const depthRowRefs = useRef({});
+  const depthTd = useRef(null);
 
   useEffect(() => {
     loadSaved().then(saved => {
@@ -163,13 +166,14 @@ export default function App() {
     else { setFieldPickPos(fieldPickPos === pos ? null : pos); }
   }
 
-  // Auto-fill: requires pitcher first
+  // Auto-fill: requires pitcher first, fills in priority order (SS > 3B > 2B)
   function autoFillLineup() {
     if (!lineup["P"]) return;
     const used = new Set();
     const next = {...lineup};
     Object.values(next).forEach(id => used.add(id));
-    POSITIONS.forEach(pos => {
+    // Fill in priority order: SS before 3B, 3B before 2B
+    AUTOFILL_ORDER.forEach(pos => {
       if (next[pos]) return;
       const col = depth[pos] || [];
       const pick = col.find(id => !used.has(id));
