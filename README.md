@@ -1,0 +1,1 @@
+# Baseball Manager - Lineup Card\nA React app for managing baseball lineups, batting orders, and depth charts.
