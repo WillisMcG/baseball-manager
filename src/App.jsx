@@ -45,38 +45,6 @@ async function persist(data) {
   try { localStorage.setItem(STORAGE_KEY, json); } catch (_) {}
 }
 
-function useTouchDrag(listRef, rowRefs, onReorder) {
-  const td = useRef(null);
-  const [over, setOver] = useState(null);
-  const [from, setFrom] = useState(null);
-  function start(e, idx) {
-    const touch = e.touches[0]; const el = rowRefs.current[idx]; if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const ghost = el.cloneNode(true);
-    ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;opacity:.85;pointer-events:none;z-index:9999;border:1.5px solid #c8973a;background:#1a2e50;border-radius:8px;box-shadow:0 8px 24px #000a;transition:none;display:flex;align-items:center;gap:12px;padding:10px 14px;font-family:'Oswald',sans-serif;color:#e8dcc8;`;
-    document.body.appendChild(ghost);
-    td.current = { fromIdx: idx, ghost, offsetY: touch.clientY - rect.top, lastOver: idx };
-    setFrom(idx); setOver(idx);
-  }
-  function move(e) {
-    if (!td.current) return; e.preventDefault();
-    const touch = e.touches[0];
-    td.current.ghost.style.top = `${touch.clientY - td.current.offsetY}px`;
-    const els = rowRefs.current;
-    for (let i = 0; i < els.length; i++) {
-      if (!els[i]) continue; const r = els[i].getBoundingClientRect();
-      if (touch.clientY >= r.top && touch.clientY <= r.bottom && i !== td.current.lastOver) { td.current.lastOver = i; setOver(i); break; }
-    }
-  }
-  function end() {
-    if (!td.current) return;
-    const { fromIdx, lastOver, ghost } = td.current; ghost.remove(); td.current = null;
-    setFrom(null); setOver(null);
-    if (fromIdx !== lastOver) onReorder(fromIdx, lastOver);
-  }
-  return { from, over, start, move, end };
-}
-
 export default function App() {
   const [ready, setReady] = useState(false);
   const [players, setPlayers] = useState([]);
@@ -93,9 +61,9 @@ export default function App() {
   const [posDragState, setPosDragState] = useState(null);
   const [batDrag, setBatDrag] = useState(null);
   const batRowRefs = useRef([]);
-  const depthRowRefs = useRef({});
-  const depthTd = useRef(null);
-  const [depthDrag, setDepthDrag] = useState(null);
+
+  // Depth chart: tap-to-reorder state
+  const [depthEditPos, setDepthEditPos] = useState(null); // which position is open for editing
 
   useEffect(() => {
     loadSaved().then(saved => {
@@ -149,10 +117,12 @@ export default function App() {
     setPlayers(next); setDepth(d => syncDepth(next, d)); setEditingPlayer(null);
   }
 
+  // Batting order drag (mouse)
   function onBatDragStart(e, idx) { setBatDrag({from:idx}); e.dataTransfer.effectAllowed="move"; }
   function onBatDragOver(e, idx) { e.preventDefault(); if(batDrag && batDrag.from!==idx) setBatDrag(d=>({...d,over:idx})); }
   function onBatDrop(e, idx) { e.preventDefault(); if(!batDrag) return; const {from}=batDrag; if(from!==idx) setBattingOrder(b=>{const n=[...b],[m]=n.splice(from,1);n.splice(idx,0,m);return n;}); setBatDrag(null); }
 
+  // Batting order touch drag
   const batTouch = useRef(null);
   function onBatTouchStart(e, idx) {
     const touch=e.touches[0], el=batRowRefs.current[idx]; if(!el) return;
@@ -171,6 +141,7 @@ export default function App() {
     if(fromIdx!==lastOver) setBattingOrder(b=>{const n=[...b],[m]=n.splice(fromIdx,1);n.splice(lastOver,0,m);return n;}); setBatDrag(null);
   }
 
+  // Field lineup
   function onRosterDragStart(e, pid) { setPosDragState({playerId:pid}); e.dataTransfer.effectAllowed="copy"; }
   function onPosDrop(e, pos) { e.preventDefault(); if(!posDragState) return; const {playerId}=posDragState, pl=playerById(playerId); if(!pl||!pl.positions.includes(pos)) return; setLineup(l=>({...l,[pos]:playerId})); setPosDragState(null); }
   function onPosDragOver(e, pos) { e.preventDefault(); if(!posDragState) return; const pl=playerById(posDragState.playerId); e.dataTransfer.dropEffect=(pl&&pl.positions.includes(pos))?"copy":"none"; }
@@ -182,29 +153,32 @@ export default function App() {
     setLineup(next);
   }
 
+  // Saved lineups
   function saveCurrentLineup() { const name = saveNameInput.trim() || `Lineup ${savedLineups.length+1}`; const entry = { id: genId(), name, lineup: {...lineup}, battingOrder: [...battingOrder] }; setSavedLineups(sl => [...sl, entry]); setSaveNameInput(""); setShowSaveForm(false); }
   function loadLineup(entry) { setLineup({...entry.lineup}); setBattingOrder([...entry.battingOrder]); setActiveTab("field"); }
   function deleteLineup(id) { setSavedLineups(sl => sl.filter(s => s.id !== id)); }
   function overwriteLineup(id) { setSavedLineups(sl => sl.map(s => s.id===id ? {...s,lineup:{...lineup},battingOrder:[...battingOrder]} : s)); }
 
-  function onDepthDragStart(e, pos, idx) { setDepthDrag({pos,from:idx,over:idx}); e.dataTransfer.effectAllowed="move"; }
-  function onDepthDragOver(e, pos, idx) { e.preventDefault(); if(depthDrag&&depthDrag.pos===pos&&depthDrag.from!==idx) setDepthDrag(d=>({...d,over:idx})); }
-  function onDepthDrop(e, pos, idx) { e.preventDefault(); if(!depthDrag||depthDrag.pos!==pos) return; const {from}=depthDrag; if(from!==idx) setDepth(d=>{const n={...d,[pos]:[...d[pos]]};const [m]=n[pos].splice(from,1);n[pos].splice(idx,0,m);return n;}); setDepthDrag(null); }
+  // Depth chart: move player up/down by tapping arrows
+  function depthMoveUp(pos, idx) {
+    if (idx === 0) return;
+    setDepth(d => {
+      const n = {...d, [pos]: [...d[pos]]};
+      const [item] = n[pos].splice(idx, 1);
+      n[pos].splice(idx - 1, 0, item);
+      return n;
+    });
+  }
 
-  function onDepthTouchStart(e, pos, idx) {
-    const touch=e.touches[0]; const refs=depthRowRefs.current[pos]||[]; const el=refs[idx]; if(!el) return;
-    const rect=el.getBoundingClientRect(); const ghost=el.cloneNode(true);
-    ghost.style.cssText=`position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;opacity:.85;pointer-events:none;z-index:9999;border:1.5px solid #c8973a;background:#1a2e50;border-radius:6px;box-shadow:0 6px 20px #000a;transition:none;padding:7px 10px;font-family:'Oswald',sans-serif;color:#e8dcc8;font-size:13px;`;
-    document.body.appendChild(ghost); depthTd.current={pos,fromIdx:idx,ghost,offsetY:touch.clientY-rect.top,lastOver:idx}; setDepthDrag({pos,from:idx,over:idx});
-  }
-  function onDepthTouchMove(e) {
-    if(!depthTd.current) return; e.preventDefault(); const touch=e.touches[0]; depthTd.current.ghost.style.top=`${touch.clientY-depthTd.current.offsetY}px`;
-    const {pos}=depthTd.current; const refs=depthRowRefs.current[pos]||[];
-    for(let i=0;i<refs.length;i++){ const el=refs[i]; if(!el) continue; const r=el.getBoundingClientRect(); if(touch.clientY>=r.top&&touch.clientY<=r.bottom&&i!==depthTd.current.lastOver){ depthTd.current.lastOver=i; setDepthDrag(d=>({...d,over:i})); break; } }
-  }
-  function onDepthTouchEnd() {
-    if(!depthTd.current) return; const {pos,fromIdx,lastOver,ghost}=depthTd.current; ghost.remove(); depthTd.current=null;
-    if(fromIdx!==lastOver) setDepth(d=>{const n={...d,[pos]:[...d[pos]]};const [m]=n[pos].splice(fromIdx,1);n[pos].splice(lastOver,0,m);return n;}); setDepthDrag(null);
+  function depthMoveDown(pos, idx) {
+    const col = depth[pos] || [];
+    if (idx >= col.length - 1) return;
+    setDepth(d => {
+      const n = {...d, [pos]: [...d[pos]]};
+      const [item] = n[pos].splice(idx, 1);
+      n[pos].splice(idx + 1, 0, item);
+      return n;
+    });
   }
 
   const assignedIds = new Set(Object.values(lineup));
@@ -217,7 +191,7 @@ export default function App() {
         @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;600;700&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap');
         *{box-sizing:border-box;margin:0;padding:0;}
         ::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-track{background:#0a1628} ::-webkit-scrollbar-thumb{background:#c8973a;border-radius:3px}
-        .tab-btn{font-family:'Oswald',sans-serif;letter-spacing:.1em;font-size:12px;text-transform:uppercase;padding:9px 16px;border:none;cursor:pointer;transition:all .2s;white-space:nowrap;}
+        .tab-btn{font-family:'Oswald',sans-serif;letter-spacing:.1em;font-size:12px;text-transform:uppercase;padding:9px 16px;border:none;cursor:pointer;transition:all .2s;white-space:nowrap;border-radius:4px;}
         .tab-active{background:#c8973a;color:#0a1628;} .tab-inactive{background:transparent;color:#7a8fa6;border:1px solid #1e3350;} .tab-inactive:hover{color:#c8973a;border-color:#c8973a;}
         .pos-chip{display:inline-flex;align-items:center;justify-content:center;width:36px;height:28px;font-family:'Oswald',sans-serif;font-size:11px;font-weight:600;letter-spacing:.05em;border-radius:4px;cursor:pointer;border:1.5px solid;transition:all .15s;user-select:none;}
         .pos-on{background:#c8973a22;border-color:#c8973a;color:#c8973a;} .pos-off{background:transparent;border-color:#2a4060;color:#4a6080;} .pos-off:hover{border-color:#5a7090;color:#8aa0b8;}
@@ -234,10 +208,11 @@ export default function App() {
         .card{background:#0f2040;border:1.5px solid #1e3350;border-radius:10px;padding:18px;}
         .player-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;} .player-row:hover{border-color:#2e4a70;}
         .pos-badge{font-family:'Oswald',sans-serif;font-size:10px;font-weight:700;padding:2px 7px;border-radius:3px;background:#c8973a22;color:#c8973a;border:1px solid #c8973a55;}
-        .depth-col{flex:1;min-width:90px;max-width:130px;} .depth-col-header{font-family:'Oswald',sans-serif;font-size:11px;font-weight:700;letter-spacing:.1em;color:#c8973a;text-align:center;padding:6px 0;border-bottom:1px solid #1e3350;margin-bottom:6px;}
-        .depth-slot{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:6px;background:#0f2040;border:1.5px solid #1e3350;cursor:grab;user-select:none;transition:border-color .15s,background .15s;margin-bottom:5px;font-family:'Oswald',sans-serif;font-size:13px;} .depth-slot:hover{border-color:#2e4a70;} .depth-slot.dragging{opacity:.35;} .depth-slot.drag-over{border-color:#c8973a;background:#1a2e50;}
-        .depth-rank{font-size:10px;color:#c8973a;font-weight:700;width:14px;text-align:right;flex-shrink:0;}
         .saved-card{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;} .saved-card:hover{border-color:#2e4a70;}
+        .depth-pos-btn{display:flex;align-items:center;justify-content:center;padding:10px 16px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;cursor:pointer;transition:all .15s;gap:8px;} .depth-pos-btn:hover{border-color:#2e4a70;} .depth-pos-btn.active{border-color:#c8973a;background:#1a2e50;}
+        .depth-player-row{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;margin-bottom:6px;transition:all .15s;}
+        .depth-arrow{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;border:1.5px solid #1e3350;background:transparent;color:#7a8fa6;cursor:pointer;font-size:16px;transition:all .15s;flex-shrink:0;} .depth-arrow:hover{border-color:#c8973a;color:#c8973a;background:#c8973a11;} .depth-arrow:disabled{opacity:.2;cursor:default;}
+        .depth-overlay{position:fixed;inset:0;background:#0a1628ee;z-index:100;display:flex;flex-direction:column;padding:20px;overflow-y:auto;}
       `}</style>
 
       <div style={{borderBottom:"1px solid #1e3350",padding:"16px 20px",display:"flex",alignItems:"center",gap:14}}>
@@ -259,7 +234,8 @@ export default function App() {
 
         {activeTab==="lineups" && (<div style={{display:"flex",flexDirection:"column",gap:20}}><div className="card"><div className="section-label">Save Current Lineup</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:12}}>Saves the current field lineup + batting order as a named snapshot.</div>{showSaveForm?(<div style={{display:"flex",gap:10}}><input type="text" placeholder="Lineup name…" value={saveNameInput} onChange={e=>setSaveNameInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveCurrentLineup()}/><button className="btn-primary" onClick={saveCurrentLineup}>Save</button><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6"}} onClick={()=>setShowSaveForm(false)}>Cancel</button></div>):(<button className="btn-primary" onClick={()=>setShowSaveForm(true)}>💾 Save Snapshot</button>)}</div>{savedLineups.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:40}}>No saved lineups yet.</div>:<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="section-label">{savedLineups.length} Saved Lineup{savedLineups.length!==1?"s":""}</div>{savedLineups.map(s=>{const starters=POSITIONS.filter(p=>s.lineup[p]);return(<div key={s.id} className="saved-card"><div style={{flex:1}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:16,marginBottom:4}}>{s.name}</div><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{starters.map(pos=>(<span key={pos} style={{fontFamily:"'Oswald',sans-serif",fontSize:9,padding:"2px 6px",borderRadius:3,background:"#0a1628",border:"1px solid #1e3350",color:"#7a8fa6"}}>{pos}: {playerById(s.lineup[pos])?.name?.split(" ")[0]||"?"}</span>))}</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#4a6a8a",marginTop:4}}>{s.battingOrder.length} batters</div></div><div style={{display:"flex",flexDirection:"column",gap:5}}><button className="btn-subtle" onClick={()=>loadLineup(s)}>Load →</button><button className="btn-subtle" onClick={()=>overwriteLineup(s.id)}>Overwrite</button><button className="btn-ghost" style={{padding:"4px 10px",fontSize:10}} onClick={()=>deleteLineup(s.id)}>Delete</button></div></div>);})}</div>}</div>)}
 
-        {activeTab==="depth" && (<div>{players.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:60}}>Add players to the roster first.</div>:<><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:16}}>Players appear in every column for positions in their profile. Drag within a column to set depth order.</div><div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-start"}}>{POSITIONS.map(pos=>{const col=depth[pos]||[];if(col.length===0) return(<div key={pos} className="depth-col" style={{opacity:.4}}><div className="depth-col-header">{pos}</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#3a5a7a",textAlign:"center",padding:"8px 0"}}>—</div></div>);if(!depthRowRefs.current[pos]) depthRowRefs.current[pos]=[];return(<div key={pos} className="depth-col"><div className="depth-col-header">{pos}<span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontWeight:400,fontSize:10,color:"#4a6a8a",marginLeft:4}}>{POSITION_LABELS[pos]}</span></div>{col.map((pid,idx)=>{const pl=playerById(pid);if(!pl) return null;const isDragging=depthDrag?.pos===pos&&depthDrag.from===idx;const isOver=depthDrag?.pos===pos&&depthDrag.over===idx&&depthDrag.from!==idx;return(<div key={pid} ref={el=>{if(!depthRowRefs.current[pos])depthRowRefs.current[pos]=[];depthRowRefs.current[pos][idx]=el;}} className={`depth-slot${isDragging?" dragging":""}${isOver?" drag-over":""}`} draggable onDragStart={e=>onDepthDragStart(e,pos,idx)} onDragOver={e=>onDepthDragOver(e,pos,idx)} onDrop={e=>onDepthDrop(e,pos,idx)} onDragEnd={()=>setDepthDrag(null)} onTouchStart={e=>onDepthTouchStart(e,pos,idx)} onTouchMove={onDepthTouchMove} onTouchEnd={onDepthTouchEnd} style={{touchAction:"none"}}><span className="depth-rank">{idx+1}</span><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13}}>{pl.name}</span></div>);})}</div>);})}</div></>}</div>)}
+        {/* ════════ DEPTH CHART — tap to reorder ════════ */}
+        {activeTab==="depth" && (<div>{players.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:60}}>Add players to the roster first.</div>:<><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:16}}>Tap a position to see and reorder players. Use arrows to move players up or down in the depth chart.</div><div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>{POSITIONS.map(pos=>{const col=depth[pos]||[];const starter=col[0]?playerById(col[0]):null;const isActive=depthEditPos===pos;return(<div key={pos} className={`depth-pos-btn${isActive?" active":""}`} onClick={()=>setDepthEditPos(isActive?null:pos)} style={{flexDirection:"column",minWidth:80}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:14,fontWeight:700,color:isActive?"#c8973a":"#7a8fa6",letterSpacing:".05em"}}>{pos}</div><div style={{fontFamily:"'Crimson Text',serif",fontSize:11,color:"#4a6a8a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:80}}>{starter?starter.name.split(" ")[0]:"—"}</div><div style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#3a5a7a"}}>{col.length} player{col.length!==1?"s":""}</div></div>);})}</div>{depthEditPos&&(()=>{const pos=depthEditPos;const col=depth[pos]||[];return(<div className="card" style={{borderColor:"#c8973a"}}><div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}><div><div style={{fontFamily:"'Oswald',sans-serif",fontSize:18,fontWeight:700,color:"#c8973a",letterSpacing:".05em"}}>{pos}</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a"}}>{POSITION_LABELS[pos]}</div></div><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6",padding:"5px 12px"}} onClick={()=>setDepthEditPos(null)}>Done</button></div>{col.length===0?<div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#3a5a7a",textAlign:"center",padding:20}}>No players at this position.</div>:col.map((pid,idx)=>{const pl=playerById(pid);if(!pl) return null;return(<div key={pid} className="depth-player-row"><div style={{fontFamily:"'Oswald',sans-serif",fontSize:20,fontWeight:700,color:idx===0?"#c8973a":"#4a6a8a",width:28,textAlign:"right",flexShrink:0}}>{idx+1}</div><div style={{width:1,height:28,background:"#1e3350",flexShrink:0}}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:15,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{pl.name}</div>{idx===0&&<div style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#c8973a",letterSpacing:".1em"}}>STARTER</div>}</div><button className="depth-arrow" disabled={idx===0} onClick={()=>depthMoveUp(pos,idx)}>▲</button><button className="depth-arrow" disabled={idx>=col.length-1} onClick={()=>depthMoveDown(pos,idx)}>▼</button></div>);})}</div>);})()}</>}</div>)}
       </div>
     </div>
   );
