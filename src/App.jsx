@@ -62,10 +62,12 @@ export default function App() {
   const batRowRefs = useRef([]);
 
   // Field tab: tap-to-pick state
-  const [fieldPickPos, setFieldPickPos] = useState(null); // which position is showing player picker
+  const [fieldPickPos, setFieldPickPos] = useState(null);
 
-  // Depth chart: tap-to-reorder state
-  const [depthEditPos, setDepthEditPos] = useState(null);
+  // Depth chart: drag state
+  const [depthDrag, setDepthDrag] = useState(null); // {pos, from, over}
+  const depthRowRefs = useRef({}); // {pos: [el,...]}
+  const depthTd = useRef(null); // touch drag ref
 
   useEffect(() => {
     loadSaved().then(saved => {
@@ -147,7 +149,6 @@ export default function App() {
   function clearPos(pos) { setLineup(l=>{const n={...l};delete n[pos];return n;}); }
 
   function assignPlayerToPos(pos, playerId) {
-    // Remove this player from any other position they might be in
     setLineup(l => {
       const n = {...l};
       Object.keys(n).forEach(k => { if (n[k] === playerId) delete n[k]; });
@@ -158,26 +159,18 @@ export default function App() {
   }
 
   function handleFieldPosClick(pos) {
-    if (lineup[pos]) {
-      // Already assigned — clear it
-      clearPos(pos);
-      setFieldPickPos(null);
-    } else {
-      // Open picker for this position
-      setFieldPickPos(fieldPickPos === pos ? null : pos);
-    }
+    if (lineup[pos]) { clearPos(pos); setFieldPickPos(null); }
+    else { setFieldPickPos(fieldPickPos === pos ? null : pos); }
   }
 
-  // Auto-fill: requires pitcher first, then fills rest from depth chart
+  // Auto-fill: requires pitcher first
   function autoFillLineup() {
-    if (!lineup["P"]) return; // pitcher must be selected first
+    if (!lineup["P"]) return;
     const used = new Set();
-    const next = {...lineup}; // keep existing assignments (especially P)
-    // Mark already-assigned players as used
+    const next = {...lineup};
     Object.values(next).forEach(id => used.add(id));
-    // Fill remaining positions from depth chart
     POSITIONS.forEach(pos => {
-      if (next[pos]) return; // already assigned
+      if (next[pos]) return;
       const col = depth[pos] || [];
       const pick = col.find(id => !used.has(id));
       if (pick) { next[pos] = pick; used.add(pick); }
@@ -191,15 +184,26 @@ export default function App() {
   function deleteLineup(id) { setSavedLineups(sl => sl.filter(s => s.id !== id)); }
   function overwriteLineup(id) { setSavedLineups(sl => sl.map(s => s.id===id ? {...s,lineup:{...lineup},battingOrder:[...battingOrder]} : s)); }
 
-  // Depth chart: move player up/down
-  function depthMoveUp(pos, idx) {
-    if (idx === 0) return;
-    setDepth(d => { const n = {...d, [pos]: [...d[pos]]}; const [item] = n[pos].splice(idx, 1); n[pos].splice(idx - 1, 0, item); return n; });
+  // Depth chart drag — mouse
+  function onDepthDragStart(e, pos, idx) { setDepthDrag({pos,from:idx,over:idx}); e.dataTransfer.effectAllowed="move"; }
+  function onDepthDragOver(e, pos, idx) { e.preventDefault(); if(depthDrag&&depthDrag.pos===pos&&depthDrag.from!==idx) setDepthDrag(d=>({...d,over:idx})); }
+  function onDepthDrop(e, pos, idx) { e.preventDefault(); if(!depthDrag||depthDrag.pos!==pos) return; const {from}=depthDrag; if(from!==idx) setDepth(d=>{const n={...d,[pos]:[...d[pos]]};const [m]=n[pos].splice(from,1);n[pos].splice(idx,0,m);return n;}); setDepthDrag(null); }
+
+  // Depth chart drag — touch
+  function onDepthTouchStart(e, pos, idx) {
+    const touch=e.touches[0]; const refs=depthRowRefs.current[pos]||[]; const el=refs[idx]; if(!el) return;
+    const rect=el.getBoundingClientRect(); const ghost=el.cloneNode(true);
+    ghost.style.cssText=`position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;opacity:.85;pointer-events:none;z-index:9999;border:1.5px solid #c8973a;background:#1a2e50;border-radius:6px;box-shadow:0 6px 20px #000a;transition:none;padding:7px 10px;font-family:'Oswald',sans-serif;color:#e8dcc8;font-size:13px;`;
+    document.body.appendChild(ghost); depthTd.current={pos,fromIdx:idx,ghost,offsetY:touch.clientY-rect.top,lastOver:idx}; setDepthDrag({pos,from:idx,over:idx});
   }
-  function depthMoveDown(pos, idx) {
-    const col = depth[pos] || [];
-    if (idx >= col.length - 1) return;
-    setDepth(d => { const n = {...d, [pos]: [...d[pos]]}; const [item] = n[pos].splice(idx, 1); n[pos].splice(idx + 1, 0, item); return n; });
+  function onDepthTouchMove(e) {
+    if(!depthTd.current) return; e.preventDefault(); const touch=e.touches[0]; depthTd.current.ghost.style.top=`${touch.clientY-depthTd.current.offsetY}px`;
+    const {pos}=depthTd.current; const refs=depthRowRefs.current[pos]||[];
+    for(let i=0;i<refs.length;i++){ const el=refs[i]; if(!el) continue; const r=el.getBoundingClientRect(); if(touch.clientY>=r.top&&touch.clientY<=r.bottom&&i!==depthTd.current.lastOver){ depthTd.current.lastOver=i; setDepthDrag(d=>({...d,over:i})); break; } }
+  }
+  function onDepthTouchEnd() {
+    if(!depthTd.current) return; const {pos,fromIdx,lastOver,ghost}=depthTd.current; ghost.remove(); depthTd.current=null;
+    if(fromIdx!==lastOver) setDepth(d=>{const n={...d,[pos]:[...d[pos]]};const [m]=n[pos].splice(fromIdx,1);n[pos].splice(lastOver,0,m);return n;}); setDepthDrag(null);
   }
 
   const assignedIds = new Set(Object.values(lineup));
@@ -231,10 +235,11 @@ export default function App() {
         .player-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;} .player-row:hover{border-color:#2e4a70;}
         .pos-badge{font-family:'Oswald',sans-serif;font-size:10px;font-weight:700;padding:2px 7px;border-radius:3px;background:#c8973a22;color:#c8973a;border:1px solid #c8973a55;}
         .saved-card{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;} .saved-card:hover{border-color:#2e4a70;}
-        .depth-pos-btn{display:flex;align-items:center;justify-content:center;padding:10px 16px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;cursor:pointer;transition:all .15s;gap:8px;} .depth-pos-btn:hover{border-color:#2e4a70;} .depth-pos-btn.active{border-color:#c8973a;background:#1a2e50;}
-        .depth-player-row{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;margin-bottom:6px;transition:all .15s;}
-        .depth-arrow{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;border:1.5px solid #1e3350;background:transparent;color:#7a8fa6;cursor:pointer;font-size:16px;transition:all .15s;flex-shrink:0;} .depth-arrow:hover{border-color:#c8973a;color:#c8973a;background:#c8973a11;} .depth-arrow:disabled{opacity:.2;cursor:default;}
         .pick-player{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:8px;background:#0f2040;border:1.5px solid #1e3350;cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent;} .pick-player:hover{border-color:#4aaa6a;background:#0a2a1a44;} .pick-player.already-assigned{opacity:.35;cursor:default;}
+        .depth-col{flex:1;min-width:90px;max-width:130px;}
+        .depth-col-header{font-family:'Oswald',sans-serif;font-size:11px;font-weight:700;letter-spacing:.1em;color:#c8973a;text-align:center;padding:6px 0;border-bottom:1px solid #1e3350;margin-bottom:6px;}
+        .depth-slot{display:flex;align-items:center;gap:6px;padding:7px 10px;border-radius:6px;background:#0f2040;border:1.5px solid #1e3350;cursor:grab;user-select:none;transition:border-color .15s,background .15s;margin-bottom:5px;font-family:'Oswald',sans-serif;font-size:13px;} .depth-slot:hover{border-color:#2e4a70;} .depth-slot.dragging{opacity:.35;} .depth-slot.drag-over{border-color:#c8973a;background:#1a2e50;}
+        .depth-rank{font-size:10px;color:#c8973a;font-weight:700;width:14px;text-align:right;flex-shrink:0;}
       `}</style>
 
       <div style={{borderBottom:"1px solid #1e3350",padding:"16px 20px",display:"flex",alignItems:"center",gap:14}}>
@@ -262,82 +267,71 @@ export default function App() {
             {!hasPitcher && <span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#d4724a"}}>Select pitcher first</span>}
             {Object.keys(lineup).length>0&&<button className="btn-ghost" style={{padding:"5px 10px",fontSize:10}} onClick={()=>{setLineup({});setFieldPickPos(null);}}>Clear All</button>}
           </div>
-
-          {/* Field diagram */}
           <div style={{position:"relative",width:340,height:340,borderRadius:12,overflow:"hidden",background:"radial-gradient(ellipse at 50% 90%,#1a4a1a 0%,#0d3010 40%,#08200a 100%)",border:"2px solid #1e3350",margin:"0 auto"}}>
             <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",opacity:.35}} viewBox="0 0 340 340"><polygon points="170,260 232,198 170,136 108,198" fill="none" stroke="#7a9a7a" strokeWidth="1.5"/><path d="M108,198 Q170,52 232,198" fill="none" stroke="#7a9a7a" strokeWidth="1" strokeDasharray="4,4"/><line x1="0" y1="260" x2="340" y2="260" stroke="#7a9a7a" strokeWidth="1" opacity=".5"/><circle cx="170" cy="274" r="16" fill="none" stroke="#7a9a7a" strokeWidth="1.5"/></svg>
-            {POSITIONS.filter(p=>p!=="DH").map(pos=>{
-              const coords=FIELD_POSITIONS[pos];
-              const assignedId=lineup[pos];
-              const assignedPlayer=assignedId?playerById(assignedId):null;
-              const isPicking=fieldPickPos===pos;
-              const cc=isPicking?"picking":(assignedPlayer?"filled":"empty");
-              return(
-                <div key={pos} className="field-slot" style={{top:coords.top,left:coords.left}} onClick={()=>handleFieldPosClick(pos)}>
-                  <div className={`field-circle ${cc}`}>
-                    {assignedPlayer
-                      ?<span style={{fontSize:8,textAlign:"center",padding:"0 2px",lineHeight:1.2}}>{assignedPlayer.name.split(" ").map(w=>w[0]).join("").slice(0,3)}</span>
-                      :pos}
-                  </div>
-                  {assignedPlayer&&<div style={{fontFamily:"'Oswald',sans-serif",fontSize:8,color:"#c8973a",background:"#0a1628cc",padding:"1px 4px",borderRadius:3,whiteSpace:"nowrap",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis"}}>{assignedPlayer.name.split(" ")[0]}</div>}
-                </div>
-              );
-            })}
+            {POSITIONS.filter(p=>p!=="DH").map(pos=>{const coords=FIELD_POSITIONS[pos];const assignedId=lineup[pos];const assignedPlayer=assignedId?playerById(assignedId):null;const isPicking=fieldPickPos===pos;const cc=isPicking?"picking":(assignedPlayer?"filled":"empty");return(<div key={pos} className="field-slot" style={{top:coords.top,left:coords.left}} onClick={()=>handleFieldPosClick(pos)}><div className={`field-circle ${cc}`}>{assignedPlayer?<span style={{fontSize:8,textAlign:"center",padding:"0 2px",lineHeight:1.2}}>{assignedPlayer.name.split(" ").map(w=>w[0]).join("").slice(0,3)}</span>:pos}</div>{assignedPlayer&&<div style={{fontFamily:"'Oswald',sans-serif",fontSize:8,color:"#c8973a",background:"#0a1628cc",padding:"1px 4px",borderRadius:3,whiteSpace:"nowrap",maxWidth:60,overflow:"hidden",textOverflow:"ellipsis"}}>{assignedPlayer.name.split(" ")[0]}</div>}</div>);})}
           </div>
-
-          {/* DH slot */}
           <div style={{marginTop:8,display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:8,border:fieldPickPos==="DH"?"1.5px solid #4aaa6a":"1.5px dashed #2a4a6a",background:fieldPickPos==="DH"?"#0a2a1a44":"#0a1628",cursor:"pointer",maxWidth:340,margin:"8px auto 0"}} onClick={()=>handleFieldPosClick("DH")}>
             <span style={{fontFamily:"'Oswald',sans-serif",fontSize:13,color:fieldPickPos==="DH"?"#4aaa6a":"#4a6a8a",letterSpacing:".1em",fontWeight:700}}>DH</span>
-            {lineup["DH"]?(()=>{const dhPl=playerById(lineup["DH"]);return <span style={{fontFamily:"'Oswald',sans-serif",fontSize:14,color:"#c8973a"}}>{dhPl?.name}</span>;})()
-              :<span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#2a4a6a"}}>Tap to assign</span>}
+            {lineup["DH"]?(()=>{const dhPl=playerById(lineup["DH"]);return <span style={{fontFamily:"'Oswald',sans-serif",fontSize:14,color:"#c8973a"}}>{dhPl?.name}</span>;})():<span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#2a4a6a"}}>Tap to assign</span>}
           </div>
-
-          {/* Player picker — shows when a position is tapped */}
-          {fieldPickPos && (()=>{
-            const pos = fieldPickPos;
-            const eligible = players.filter(p => p.positions.includes(pos));
-            const currentAssigned = assignedIds;
-            return (
-              <div className="card" style={{borderColor:"#4aaa6a",marginTop:14,maxWidth:340,marginLeft:"auto",marginRight:"auto"}}>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                  <div>
-                    <span style={{fontFamily:"'Oswald',sans-serif",fontSize:16,fontWeight:700,color:"#4aaa6a"}}>Select {POSITION_LABELS[pos]}</span>
-                  </div>
-                  <button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6",padding:"4px 10px",fontSize:10}} onClick={()=>setFieldPickPos(null)}>Cancel</button>
-                </div>
-                {eligible.length===0
-                  ?<div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#3a5a7a",textAlign:"center",padding:16}}>No players can play {pos}. Add positions in the Roster tab.</div>
-                  :<div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {eligible.map(pl=>{
-                      const isUsed = currentAssigned.has(pl.id) && lineup[pos] !== pl.id;
-                      return (
-                        <div key={pl.id} className={`pick-player${isUsed?" already-assigned":""}`} onClick={()=>!isUsed&&assignPlayerToPos(pos,pl.id)}>
-                          <div style={{fontFamily:"'Oswald',sans-serif",fontSize:15,flex:1}}>{pl.name}</div>
-                          {isUsed && <span style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#4a6a8a"}}>IN LINEUP</span>}
-                          {!isUsed && <span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#4aaa6a"}}>SELECT</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                }
-              </div>
-            );
-          })()}
-
-          {/* Current starters summary */}
-          {Object.keys(lineup).length>0&&(
-            <div style={{marginTop:16,maxWidth:340,marginLeft:"auto",marginRight:"auto"}}>
-              <div className="section-label">Current Lineup</div>
-              {POSITIONS.filter(p=>lineup[p]).map(pos=>(<div key={pos} style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#c8973a",width:28}}>{pos}</span><span style={{fontFamily:"'Crimson Text',serif",fontSize:14,flex:1}}>{playerById(lineup[pos])?.name}</span><button className="btn-ghost" style={{padding:"2px 6px",fontSize:10}} onClick={()=>clearPos(pos)}>✕</button></div>))}
-            </div>
-          )}
+          {fieldPickPos && (()=>{const pos=fieldPickPos;const eligible=players.filter(p=>p.positions.includes(pos));return(<div className="card" style={{borderColor:"#4aaa6a",marginTop:14,maxWidth:340,marginLeft:"auto",marginRight:"auto"}}><div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:16,fontWeight:700,color:"#4aaa6a"}}>Select {POSITION_LABELS[pos]}</span><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6",padding:"4px 10px",fontSize:10}} onClick={()=>setFieldPickPos(null)}>Cancel</button></div>{eligible.length===0?<div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#3a5a7a",textAlign:"center",padding:16}}>No players can play {pos}.</div>:<div style={{display:"flex",flexDirection:"column",gap:6}}>{eligible.map(pl=>{const isUsed=assignedIds.has(pl.id)&&lineup[pos]!==pl.id;return(<div key={pl.id} className={`pick-player${isUsed?" already-assigned":""}`} onClick={()=>!isUsed&&assignPlayerToPos(pos,pl.id)}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:15,flex:1}}>{pl.name}</div>{isUsed&&<span style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#4a6a8a"}}>IN LINEUP</span>}{!isUsed&&<span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#4aaa6a"}}>SELECT</span>}</div>);})}</div>}</div>);})()}
+          {Object.keys(lineup).length>0&&(<div style={{marginTop:16,maxWidth:340,marginLeft:"auto",marginRight:"auto"}}><div className="section-label">Current Lineup</div>{POSITIONS.filter(p=>lineup[p]).map(pos=>(<div key={pos} style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}><span style={{fontFamily:"'Oswald',sans-serif",fontSize:11,color:"#c8973a",width:28}}>{pos}</span><span style={{fontFamily:"'Crimson Text',serif",fontSize:14,flex:1}}>{playerById(lineup[pos])?.name}</span><button className="btn-ghost" style={{padding:"2px 6px",fontSize:10}} onClick={()=>clearPos(pos)}>✕</button></div>))}</div>)}
         </div>)}
 
         {/* ════════ SAVED LINEUPS ════════ */}
         {activeTab==="lineups" && (<div style={{display:"flex",flexDirection:"column",gap:20}}><div className="card"><div className="section-label">Save Current Lineup</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:12}}>Saves the current field lineup + batting order as a named snapshot.</div>{showSaveForm?(<div style={{display:"flex",gap:10}}><input type="text" placeholder="Lineup name…" value={saveNameInput} onChange={e=>setSaveNameInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveCurrentLineup()}/><button className="btn-primary" onClick={saveCurrentLineup}>Save</button><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6"}} onClick={()=>setShowSaveForm(false)}>Cancel</button></div>):(<button className="btn-primary" onClick={()=>setShowSaveForm(true)}>💾 Save Snapshot</button>)}</div>{savedLineups.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:40}}>No saved lineups yet.</div>:<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="section-label">{savedLineups.length} Saved Lineup{savedLineups.length!==1?"s":""}</div>{savedLineups.map(s=>{const starters=POSITIONS.filter(p=>s.lineup[p]);return(<div key={s.id} className="saved-card"><div style={{flex:1}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:16,marginBottom:4}}>{s.name}</div><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{starters.map(pos=>(<span key={pos} style={{fontFamily:"'Oswald',sans-serif",fontSize:9,padding:"2px 6px",borderRadius:3,background:"#0a1628",border:"1px solid #1e3350",color:"#7a8fa6"}}>{pos}: {playerById(s.lineup[pos])?.name?.split(" ")[0]||"?"}</span>))}</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#4a6a8a",marginTop:4}}>{s.battingOrder.length} batters</div></div><div style={{display:"flex",flexDirection:"column",gap:5}}><button className="btn-subtle" onClick={()=>loadLineup(s)}>Load →</button><button className="btn-subtle" onClick={()=>overwriteLineup(s.id)}>Overwrite</button><button className="btn-ghost" style={{padding:"4px 10px",fontSize:10}} onClick={()=>deleteLineup(s.id)}>Delete</button></div></div>);})}</div>}</div>)}
 
-        {/* ════════ DEPTH CHART — tap to reorder ════════ */}
-        {activeTab==="depth" && (<div>{players.length===0?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:60}}>Add players to the roster first.</div>:<><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:16}}>Tap a position to see and reorder players. Use arrows to move players up or down in the depth chart.</div><div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>{POSITIONS.map(pos=>{const col=depth[pos]||[];const starter=col[0]?playerById(col[0]):null;const isActive=depthEditPos===pos;return(<div key={pos} className={`depth-pos-btn${isActive?" active":""}`} onClick={()=>setDepthEditPos(isActive?null:pos)} style={{flexDirection:"column",minWidth:80}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:14,fontWeight:700,color:isActive?"#c8973a":"#7a8fa6",letterSpacing:".05em"}}>{pos}</div><div style={{fontFamily:"'Crimson Text',serif",fontSize:11,color:"#4a6a8a",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:80}}>{starter?starter.name.split(" ")[0]:"—"}</div><div style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#3a5a7a"}}>{col.length} player{col.length!==1?"s":""}</div></div>);})}</div>{depthEditPos&&(()=>{const pos=depthEditPos;const col=depth[pos]||[];return(<div className="card" style={{borderColor:"#c8973a"}}><div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}><div><div style={{fontFamily:"'Oswald',sans-serif",fontSize:18,fontWeight:700,color:"#c8973a",letterSpacing:".05em"}}>{pos}</div><div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a"}}>{POSITION_LABELS[pos]}</div></div><button className="btn-ghost" style={{borderColor:"#2e4a70",color:"#7a8fa6",padding:"5px 12px"}} onClick={()=>setDepthEditPos(null)}>Done</button></div>{col.length===0?<div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#3a5a7a",textAlign:"center",padding:20}}>No players at this position.</div>:col.map((pid,idx)=>{const pl=playerById(pid);if(!pl) return null;return(<div key={pid} className="depth-player-row"><div style={{fontFamily:"'Oswald',sans-serif",fontSize:20,fontWeight:700,color:idx===0?"#c8973a":"#4a6a8a",width:28,textAlign:"right",flexShrink:0}}>{idx+1}</div><div style={{width:1,height:28,background:"#1e3350",flexShrink:0}}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:"'Oswald',sans-serif",fontSize:15,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{pl.name}</div>{idx===0&&<div style={{fontFamily:"'Oswald',sans-serif",fontSize:9,color:"#c8973a",letterSpacing:".1em"}}>STARTER</div>}</div><button className="depth-arrow" disabled={idx===0} onClick={()=>depthMoveUp(pos,idx)}>▲</button><button className="depth-arrow" disabled={idx>=col.length-1} onClick={()=>depthMoveDown(pos,idx)}>▼</button></div>);})}</div>);})()}</>}</div>)}
+        {/* ════════ DEPTH CHART — columns with drag-and-drop ════════ */}
+        {activeTab==="depth" && (<div>
+          {players.length===0
+            ?<div style={{textAlign:"center",color:"#3a5a7a",fontFamily:"'Crimson Text',serif",fontStyle:"italic",padding:60}}>Add players to the roster first.</div>
+            :<>
+              <div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:13,color:"#5a7a9a",marginBottom:16}}>
+                Drag players within a column to set depth order. #1 is the starter.
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-start",overflowX:"auto",paddingBottom:8}}>
+                {POSITIONS.map(pos=>{
+                  const col=depth[pos]||[];
+                  if(col.length===0) return(
+                    <div key={pos} className="depth-col" style={{opacity:.4}}>
+                      <div className="depth-col-header">{pos}</div>
+                      <div style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontSize:12,color:"#3a5a7a",textAlign:"center",padding:"8px 0"}}>—</div>
+                    </div>
+                  );
+                  if(!depthRowRefs.current[pos]) depthRowRefs.current[pos]=[];
+                  return(
+                    <div key={pos} className="depth-col">
+                      <div className="depth-col-header">{pos}<span style={{fontFamily:"'Crimson Text',serif",fontStyle:"italic",fontWeight:400,fontSize:10,color:"#4a6a8a",marginLeft:4}}>{POSITION_LABELS[pos]}</span></div>
+                      {col.map((pid,idx)=>{
+                        const pl=playerById(pid); if(!pl) return null;
+                        const isDragging=depthDrag?.pos===pos&&depthDrag.from===idx;
+                        const isOver=depthDrag?.pos===pos&&depthDrag.over===idx&&depthDrag.from!==idx;
+                        return(
+                          <div key={pid}
+                            ref={el=>{if(!depthRowRefs.current[pos])depthRowRefs.current[pos]=[];depthRowRefs.current[pos][idx]=el;}}
+                            className={`depth-slot${isDragging?" dragging":""}${isOver?" drag-over":""}`}
+                            draggable
+                            onDragStart={e=>onDepthDragStart(e,pos,idx)}
+                            onDragOver={e=>onDepthDragOver(e,pos,idx)}
+                            onDrop={e=>onDepthDrop(e,pos,idx)}
+                            onDragEnd={()=>setDepthDrag(null)}
+                            onTouchStart={e=>onDepthTouchStart(e,pos,idx)}
+                            onTouchMove={onDepthTouchMove}
+                            onTouchEnd={onDepthTouchEnd}
+                            style={{touchAction:"none"}}>
+                            <span className="depth-rank">{idx+1}</span>
+                            <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:13}}>{pl.name}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          }
+        </div>)}
       </div>
     </div>
   );
